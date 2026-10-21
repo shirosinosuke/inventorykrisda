@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { QrCode, Lock, Mail, ArrowRight, ArrowLeft, ShieldCheck, UserCheck, AlertCircle } from 'lucide-react';
+import { UserAccount } from '../types.ts';
 
 interface LoginPageProps {
+  users?: UserAccount[];
   onLoginSuccess: (user: { name: string; email: string; role: string }) => void;
   onBackToHome: () => void;
 }
 
-export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onBackToHome }) => {
+export const LoginPage: React.FC<LoginPageProps> = ({ users = [], onLoginSuccess, onBackToHome }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
@@ -19,31 +21,25 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onBackToHo
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPass = password.trim();
 
-    // Check custom users in localStorage
-    try {
-      const storedUsers = localStorage.getItem('sistem_inventaris_users');
-      if (storedUsers) {
-        const usersList = JSON.parse(storedUsers);
-        const matched = usersList.find((u: any) => u.email.toLowerCase() === trimmedEmail);
-        if (matched) {
-          if (matched.status === 'Nonaktif') {
-            setErrorMsg('Akun pengguna ini sedang dinonaktifkan oleh Administrator.');
-            return;
-          }
-          if (matched.password && matched.password !== trimmedPass) {
-            setErrorMsg('Kata sandi salah. Silakan coba lagi.');
-            return;
-          }
-          onLoginSuccess({
-            name: matched.name,
-            email: matched.email,
-            role: matched.role || 'Staf Inventaris',
-          });
+    // 1. Check live users from Firestore
+    if (users && users.length > 0) {
+      const matched = users.find((u) => u.email.toLowerCase() === trimmedEmail);
+      if (matched) {
+        if (matched.status === 'Nonaktif') {
+          setErrorMsg('Akun pengguna ini sedang dinonaktifkan oleh Administrator.');
           return;
         }
+        if (matched.password && matched.password !== trimmedPass) {
+          setErrorMsg('Kata sandi salah. Silakan periksa kembali.');
+          return;
+        }
+        onLoginSuccess({
+          name: matched.name,
+          email: matched.email,
+          role: matched.role || 'Staf Inventaris',
+        });
+        return;
       }
-    } catch (e) {
-      console.warn('Error reading stored users:', e);
     }
 
     // Default built-in credentials

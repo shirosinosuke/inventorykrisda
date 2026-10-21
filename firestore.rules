@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Inventory items collection
+    match /items/{itemId} {
+      allow read: if true; // Public scan and viewer need to read item details
+      allow create: if isValidId(itemId) && request.resource.data.name is string && request.resource.data.category is string;
+      allow update: if isValidId(itemId) && request.resource.data.name is string;
+      allow delete: if isValidId(itemId);
+    }
+
+    // Master categories collection
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update: if isValidId(categoryId) && request.resource.data.name is string;
+      allow delete: if isValidId(categoryId);
+    }
+
+    // Master conditions collection
+    match /conditions/{conditionId} {
+      allow read: if true;
+      allow create, update: if isValidId(conditionId) && request.resource.data.name is string;
+      allow delete: if isValidId(conditionId);
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if isValidId(userId) && request.resource.data.email is string;
+      allow delete: if isValidId(userId);
+    }
+  }
+}

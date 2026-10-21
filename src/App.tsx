@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Package,
@@ -29,7 +29,14 @@ import {
   ShieldCheck,
   ChevronRight,
   Sparkles,
-  Camera
+  Camera,
+  Database,
+  Cloud,
+  RefreshCw,
+  Copy,
+  Check,
+  ExternalLink,
+  ShieldAlert
 } from 'lucide-react';
 
 import {
@@ -55,11 +62,26 @@ import { SetupCategories } from './components/SetupCategories.tsx';
 import { SetupConditions } from './components/SetupConditions.tsx';
 import { SetupUsers } from './components/SetupUsers.tsx';
 
-const STORAGE_KEY = 'sistem_inventaris_barang_react';
+// Firestore service
+import {
+  initializeFirestoreDatabase,
+  subscribeToItems,
+  subscribeToCategories,
+  subscribeToConditions,
+  subscribeToUsers,
+  saveItemToFirestore,
+  deleteItemFromFirestore,
+  saveCategoryToFirestore,
+  deleteCategoryFromFirestore,
+  saveConditionToFirestore,
+  deleteConditionFromFirestore,
+  saveUserToFirestore,
+  deleteUserFromFirestore,
+  FIRESTORE_RULES_SNIPPET,
+  FIREBASE_CONSOLE_RULES_URL,
+} from './firebase.ts';
+
 const AUTH_KEY = 'sistem_inventaris_auth_user';
-const CATEGORIES_KEY = 'sistem_inventaris_categories';
-const CONDITIONS_KEY = 'sistem_inventaris_conditions';
-const USERS_KEY = 'sistem_inventaris_users';
 
 interface AuthUser {
   name: string;
@@ -96,51 +118,18 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<DashboardTab>('inventory');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  // Master Data: Categories
-  const [categories, setCategories] = useState<CategorySetting[]>(() => {
-    try {
-      const saved = localStorage.getItem(CATEGORIES_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.warn('Error parsing categories:', e);
-    }
-    return DEFAULT_CATEGORIES;
-  });
+  // Firestore connection & permission states
+  const [isFirestoreConnected, setIsFirestoreConnected] = useState<boolean>(false);
+  const [isFirestoreLoading, setIsFirestoreLoading] = useState<boolean>(true);
+  const [isFirestorePermissionDenied, setIsFirestorePermissionDenied] = useState<boolean>(false);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  const [hasCopiedRules, setHasCopiedRules] = useState<boolean>(false);
 
-  // Master Data: Conditions
-  const [conditions, setConditions] = useState<ConditionSetting[]>(() => {
-    try {
-      const saved = localStorage.getItem(CONDITIONS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.warn('Error parsing conditions:', e);
-    }
-    return DEFAULT_CONDITIONS;
-  });
-
-  // Master Data: Users
-  const [users, setUsers] = useState<UserAccount[]>(() => {
-    try {
-      const saved = localStorage.getItem(USERS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.warn('Error parsing users:', e);
-    }
-    return DEFAULT_USERS;
-  });
-
-  // Inventory items
-  const [items, setItems] = useState<InventoryItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.error('Failed to parse localStorage data:', e);
-    }
-    return INITIAL_ITEMS;
-  });
+  // Master Data & Items (in-memory + synced to Firestore)
+  const [categories, setCategories] = useState<CategorySetting[]>(DEFAULT_CATEGORIES);
+  const [conditions, setConditions] = useState<ConditionSetting[]>(DEFAULT_CONDITIONS);
+  const [users, setUsers] = useState<UserAccount[]>(DEFAULT_USERS);
+  const [items, setItems] = useState<InventoryItem[]>(INITIAL_ITEMS);
 
   // Search & filter in dashboard
   const [searchQuery, setSearchQuery] = useState('');
@@ -158,47 +147,179 @@ export default function App() {
   const [isExportHtmlOpen, setIsExportHtmlOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Sync inventory items to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch (e) {
-      console.warn('LocalStorage quota exceeded or unavailable:', e);
-    }
-  }, [items]);
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((prev) => (prev === msg ? null : prev));
+    }, 3500);
+  }, []);
 
-  // Sync Categories
-  const handleSaveCategories = (updated: CategorySetting[]) => {
+  const copyRulesToClipboard = () => {
+    navigator.clipboard.writeText(FIRESTORE_RULES_SNIPPET);
+    setHasCopiedRules(true);
+    showToast('Aturan Security Rules berhasil disalin ke clipboard!');
+    setTimeout(() => setHasCopiedRules(false), 3000);
+  };
+
+  const setupFirebaseRef = useRef<() => Promise<any>>(() => Promise.resolve());
+
+  // Connect to Firestore & bind real-time listeners
+  const setupFirebase = useCallback(async () => {
+    setIsFirestoreLoading(true);
+    const initResult = await initializeFirestoreDatabase();
+
+    if (initResult.permissionDenied) {
+      setIsFirestorePermissionDenied(true);
+      setIsFirestoreConnected(false);
+      setIsFirestoreLoading(false);
+      setFirestoreError('Missing or insufficient permissions');
+    } else if (initResult.connected) {
+      setIsFirestoreConnected(true);
+      setIsFirestorePermissionDenied(false);
+      setIsFirestoreLoading(false);
+      setFirestoreError(null);
+    } else {
+      setIsFirestoreLoading(false);
+      if (initResult.error) setFirestoreError(initResult.error);
+    }
+
+    // 1. Subscribe to Items
+    const unsubItems = subscribeToItems(
+      (liveItems) => {
+        if (liveItems && liveItems.length > 0) {
+          setItems(liveItems);
+        }
+        setIsFirestoreConnected(true);
+        setIsFirestorePermissionDenied(false);
+        setIsFirestoreLoading(false);
+      },
+      (errInfo) => {
+        if (errInfo.isPermissionDenied) {
+          setIsFirestorePermissionDenied(true);
+          setIsFirestoreConnected(false);
+        }
+        setIsFirestoreLoading(false);
+      }
+    );
+
+    // 2. Subscribe to Categories
+    const unsubCats = subscribeToCategories(
+      (liveCats) => {
+        if (liveCats && liveCats.length > 0) {
+          setCategories(liveCats);
+        }
+      },
+      (errInfo) => {
+        if (errInfo.isPermissionDenied) setIsFirestorePermissionDenied(true);
+      }
+    );
+
+    // 3. Subscribe to Conditions
+    const unsubConds = subscribeToConditions(
+      (liveConds) => {
+        if (liveConds && liveConds.length > 0) {
+          setConditions(liveConds);
+        }
+      },
+      (errInfo) => {
+        if (errInfo.isPermissionDenied) setIsFirestorePermissionDenied(true);
+      }
+    );
+
+    // 4. Subscribe to Users
+    const unsubUsers = subscribeToUsers(
+      (liveUsers) => {
+        if (liveUsers && liveUsers.length > 0) {
+          setUsers(liveUsers);
+        }
+      },
+      (errInfo) => {
+        if (errInfo.isPermissionDenied) setIsFirestorePermissionDenied(true);
+      }
+    );
+
+    return () => {
+      unsubItems();
+      unsubCats();
+      unsubConds();
+      unsubUsers();
+    };
+  }, []);
+
+  useEffect(() => {
+    setupFirebaseRef.current = setupFirebase;
+  }, [setupFirebase]);
+
+  useEffect(() => {
+    let cleanupFn: (() => void) | undefined;
+    setupFirebase().then((cleanup) => {
+      cleanupFn = cleanup;
+    });
+
+    return () => {
+      if (cleanupFn) cleanupFn();
+    };
+  }, [setupFirebase]);
+
+  // Firestore: Sync Categories
+  const handleSaveCategories = async (updated: CategorySetting[]) => {
+    const previous = [...categories];
     setCategories(updated);
     try {
-      localStorage.setItem(CATEGORIES_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('LocalStorage error:', e);
+      const currentIds = new Set(updated.map((c) => c.id));
+      for (const oldCat of previous) {
+        if (!currentIds.has(oldCat.id)) {
+          await deleteCategoryFromFirestore(oldCat.id);
+        }
+      }
+      for (const cat of updated) {
+        await saveCategoryToFirestore(cat);
+      }
+    } catch {
+      // Handled in service
     }
   };
 
-  // Sync Conditions
-  const handleSaveConditions = (updated: ConditionSetting[]) => {
+  // Firestore: Sync Conditions
+  const handleSaveConditions = async (updated: ConditionSetting[]) => {
+    const previous = [...conditions];
     setConditions(updated);
     try {
-      localStorage.setItem(CONDITIONS_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('LocalStorage error:', e);
+      const currentIds = new Set(updated.map((c) => c.id));
+      for (const oldCond of previous) {
+        if (!currentIds.has(oldCond.id)) {
+          await deleteConditionFromFirestore(oldCond.id);
+        }
+      }
+      for (const cond of updated) {
+        await saveConditionToFirestore(cond);
+      }
+    } catch {
+      // Handled in service
     }
   };
 
-  // Sync Users
-  const handleSaveUsers = (updated: UserAccount[]) => {
+  // Firestore: Sync Users
+  const handleSaveUsers = async (updated: UserAccount[]) => {
+    const previous = [...users];
     setUsers(updated);
     try {
-      localStorage.setItem(USERS_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('LocalStorage error:', e);
+      const currentIds = new Set(updated.map((u) => u.id));
+      for (const oldUser of previous) {
+        if (!currentIds.has(oldUser.id)) {
+          await deleteUserFromFirestore(oldUser.id);
+        }
+      }
+      for (const usr of updated) {
+        await saveUserToFirestore(usr);
+      }
+    } catch {
+      // Handled in service
     }
   };
 
   // Cascade category rename on existing items
-  const handleUpdateItemCategoryName = (oldName: string, newName: string) => {
+  const handleUpdateItemCategoryName = async (oldName: string, newName: string) => {
     setItems((prev) =>
       prev.map((it) =>
         it.category.toLowerCase() === oldName.toLowerCase()
@@ -206,10 +327,18 @@ export default function App() {
           : it
       )
     );
+
+    const itemsToUpdate = items.filter(
+      (it) => it.category.toLowerCase() === oldName.toLowerCase()
+    );
+    for (const item of itemsToUpdate) {
+      const updated = { ...item, category: newName, updatedAt: Date.now() };
+      await saveItemToFirestore(updated);
+    }
   };
 
   // Cascade condition rename on existing items
-  const handleUpdateItemConditionName = (oldName: string, newName: string) => {
+  const handleUpdateItemConditionName = async (oldName: string, newName: string) => {
     setItems((prev) =>
       prev.map((it) =>
         it.condition.toLowerCase() === oldName.toLowerCase()
@@ -217,14 +346,15 @@ export default function App() {
           : it
       )
     );
-  };
 
-  const showToast = useCallback((msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage((prev) => (prev === msg ? null : prev));
-    }, 3000);
-  }, []);
+    const itemsToUpdate = items.filter(
+      (it) => it.condition.toLowerCase() === oldName.toLowerCase()
+    );
+    for (const item of itemsToUpdate) {
+      const updated = { ...item, condition: newName as ItemCondition, updatedAt: Date.now() };
+      await saveItemToFirestore(updated);
+    }
+  };
 
   // Login handler
   const handleLoginSuccess = (user: AuthUser) => {
@@ -310,33 +440,42 @@ export default function App() {
       });
   }, [items, searchQuery, selectedCategory, selectedCondition, sortBy]);
 
-  // CRUD Handlers
-  const handleSaveItem = (itemToSave: InventoryItem) => {
+  // Optimistic CRUD Handlers with background Firestore sync
+  const handleSaveItem = async (itemToSave: InventoryItem) => {
     const exists = items.some((it) => it.id === itemToSave.id);
+
+    // Optimistic UI update so users never see failed actions
     if (exists) {
       setItems((prev) => prev.map((it) => (it.id === itemToSave.id ? itemToSave : it)));
-      showToast(`Data barang ${itemToSave.id} berhasil diperbarui.`);
     } else {
       setItems((prev) => [itemToSave, ...prev]);
-      showToast(`Barang baru ${itemToSave.id} berhasil ditambahkan!`);
     }
+
+    // Background Firestore write
+    const res = await saveItemToFirestore(itemToSave);
+    if (res.isCloud) {
+      showToast(`Barang ${itemToSave.id} tersimpan ke Cloud Firestore!`);
+      setIsFirestoreConnected(true);
+      setIsFirestorePermissionDenied(false);
+    } else {
+      showToast(`Barang ${itemToSave.id} disimpan (Perlu update Rules di Firebase Console).`);
+      setIsFirestorePermissionDenied(true);
+    }
+
     setIsFormOpen(false);
     setEditingItem(null);
     setDetailItem(itemToSave);
   };
 
-  const handleDeleteItem = (id: string, name: string) => {
-    if (window.confirm(`Hapus barang "${name}" (${id}) dari daftar inventaris?`)) {
+  const handleDeleteItem = async (id: string, name: string) => {
+    if (window.confirm(`Hapus barang "${name}" (${id})?`)) {
       setItems((prev) => prev.filter((it) => it.id !== id));
       if (detailItem?.id === id) setDetailItem(null);
+      const res = await deleteItemFromFirestore(id);
+      if (!res.isCloud) {
+        setIsFirestorePermissionDenied(true);
+      }
       showToast(`Barang ${id} berhasil dihapus.`);
-    }
-  };
-
-  const handleResetData = () => {
-    if (window.confirm('Reset seluruh data ke daftar contoh awal?')) {
-      setItems(INITIAL_ITEMS);
-      showToast('Data inventaris berhasil direset ke contoh awal.');
     }
   };
 
@@ -467,6 +606,7 @@ export default function App() {
           </div>
         )}
         <LoginPage
+          users={users}
           onLoginSuccess={handleLoginSuccess}
           onBackToHome={() => setCurrentView('landing')}
         />
@@ -478,9 +618,9 @@ export default function App() {
   const renderSidebarContent = (isMobile = false) => {
     return (
       <div className="flex flex-col h-full justify-between">
-        <div className="space-y-6">
+        <div className="space-y-4">
           {/* Brand Mark & Close button on mobile */}
-          <div className="flex items-center justify-between px-4 pt-5 pb-2">
+          <div className="flex items-center justify-between px-4 pt-5 pb-1">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/30 text-white font-black shrink-0">
                 <QrCode className="w-5 h-5 text-white" />
@@ -506,6 +646,57 @@ export default function App() {
             )}
           </div>
 
+          {/* Firestore Connection Badge */}
+          <div className="mx-4 p-2.5 rounded-xl bg-slate-800/90 border border-slate-700/80 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="relative flex h-2 w-2">
+                <span
+                  className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                    isFirestoreConnected
+                      ? 'bg-emerald-400'
+                      : isFirestorePermissionDenied
+                      ? 'bg-amber-400'
+                      : 'bg-blue-400'
+                  }`}
+                />
+                <span
+                  className={`relative inline-flex rounded-full h-2 w-2 ${
+                    isFirestoreConnected
+                      ? 'bg-emerald-500'
+                      : isFirestorePermissionDenied
+                      ? 'bg-amber-500'
+                      : 'bg-blue-500'
+                  }`}
+                />
+              </span>
+              <div className="truncate">
+                <span className="text-[11px] font-semibold text-slate-200 block leading-tight">Firestore Cloud</span>
+                <span className="text-[10px] font-mono text-slate-400 block truncate">inventorykrisda</span>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                if (isFirestorePermissionDenied) setActiveTab('inventory');
+              }}
+              className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border shrink-0 transition-colors cursor-pointer ${
+                isFirestoreConnected
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : isFirestorePermissionDenied
+                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
+                  : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+              }`}
+              title={isFirestorePermissionDenied ? 'Klik untuk melihat panduan buka rules' : 'Status koneksi cloud'}
+            >
+              {isFirestoreLoading
+                ? 'Sync...'
+                : isFirestoreConnected
+                ? 'Online'
+                : isFirestorePermissionDenied
+                ? 'Perlu Rules'
+                : 'Connecting'}
+            </button>
+          </div>
+
           {/* User Profile Card */}
           <div className="mx-4 p-3 rounded-2xl bg-slate-800/80 border border-slate-700/80">
             <div className="flex items-center gap-3">
@@ -528,13 +719,13 @@ export default function App() {
               </span>
               <span className="text-emerald-400 font-medium flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                Online
+                Aktif
               </span>
             </div>
           </div>
 
           {/* Navigation Menu */}
-          <div className="px-3 space-y-5">
+          <div className="px-3 space-y-4">
             {/* Group 1: Menu Utama */}
             <div className="space-y-1">
               <span className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
@@ -594,7 +785,7 @@ export default function App() {
             {/* Group 2: Setup & Master Data */}
             <div className="space-y-1">
               <span className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Setup & Master Data
+                Setup Master Firestore
               </span>
 
               {/* Setup Kategori */}
@@ -760,12 +951,13 @@ export default function App() {
                   {activeTab === 'setup-kondisi' && 'Setup Master Kondisi'}
                   {activeTab === 'setup-user' && 'Setup Master Pengguna'}
                 </h1>
-                <span className="hidden sm:inline-block text-[10px] font-semibold uppercase bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full border border-indigo-200">
-                  Label 50x30 mm
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-semibold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full border border-indigo-200">
+                  <Database className="w-3 h-3 text-indigo-500" />
+                  <span>{isFirestoreConnected ? 'Firestore Cloud Online' : 'Penyimpanan Aktif'}</span>
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5 hidden sm:block">
-                Sistem Manajemen Inventaris &bull; Terhubung ke QR Code & Printer Thermal
+                Sistem Manajemen Inventaris &bull; Terhubung ke QR Code & Label Thermal 50x30 mm
               </p>
             </div>
           </div>
@@ -800,6 +992,110 @@ export default function App() {
 
         {/* MAIN BODY AREA BASED ON ACTIVETAB */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-24 lg:pb-8 space-y-6 max-w-7xl w-full mx-auto">
+          {/* FIRESTORE RULES GUIDE CARD WHEN PERMISSION DENIED */}
+          {isFirestorePermissionDenied && (
+            <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border-2 border-amber-500/50 rounded-2xl p-4 sm:p-6 shadow-xl text-slate-100 space-y-4 animate-in fade-in duration-200">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                    <ShieldAlert className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                      <span>Buka Izin Akses Firestore di Firebase Console</span>
+                      <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
+                        Missing or insufficient permissions
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                      Proyek Firebase Anda (<strong className="text-amber-300 font-mono">inventorykrisda</strong>) saat ini menolak akses baca & tulis karena Security Rules default masih terkunci. Aplikasi saat ini tetap berjalan lancar di memori. Untuk mengaktifkan sinkronisasi Cloud Firestore, ikuti 3 langkah praktis ini:
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3 Steps */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs pt-1">
+                {/* Step 1 */}
+                <div className="bg-slate-800/90 border border-slate-700/80 p-3.5 rounded-xl space-y-2.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 font-bold text-amber-400">
+                      <span className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-[11px]">1</span>
+                      <span>Buka Firebase Console</span>
+                    </div>
+                    <p className="text-slate-300 text-[11px] mt-1.5 leading-relaxed">
+                      Buka tab <strong>Rules</strong> pada Cloud Firestore di konsol Firebase proyek Anda.
+                    </p>
+                  </div>
+                  <a
+                    href={FIREBASE_CONSOLE_RULES_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer w-full"
+                  >
+                    <span>Buka Console Rules</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+
+                {/* Step 2 */}
+                <div className="bg-slate-800/90 border border-slate-700/80 p-3.5 rounded-xl space-y-2.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 font-bold text-amber-400">
+                      <span className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-[11px]">2</span>
+                      <span>Salin & Publish Rules</span>
+                    </div>
+                    <p className="text-slate-300 text-[11px] mt-1.5 leading-relaxed">
+                      Tempelkan (*paste*) aturan di bawah lalu tekan tombol <strong>Publish</strong>.
+                    </p>
+                  </div>
+                  <button
+                    onClick={copyRulesToClipboard}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600 rounded-lg text-xs font-semibold transition-colors cursor-pointer w-full"
+                  >
+                    {hasCopiedRules ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{hasCopiedRules ? 'Aturan Disalin!' : 'Salin Rules (1-Klik)'}</span>
+                  </button>
+                </div>
+
+                {/* Step 3 */}
+                <div className="bg-slate-800/90 border border-slate-700/80 p-3.5 rounded-xl space-y-2.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 font-bold text-amber-400">
+                      <span className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-[11px]">3</span>
+                      <span>Sambungkan Ulang</span>
+                    </div>
+                    <p className="text-slate-300 text-[11px] mt-1.5 leading-relaxed">
+                      Setelah Publish berhasil, klik tombol ini untuk memverifikasi koneksi cloud secara langsung.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      showToast('Menghubungkan ulang ke Firestore...');
+                      setupFirebaseRef.current();
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer w-full"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Coba Sambungkan Ulang</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Code Box */}
+              <div className="relative bg-slate-950 rounded-xl p-3 border border-slate-800 text-[11px] font-mono text-emerald-300">
+                <pre className="overflow-x-auto leading-relaxed">{FIRESTORE_RULES_SNIPPET}</pre>
+                <button
+                  onClick={copyRulesToClipboard}
+                  className="absolute top-2.5 right-2.5 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md text-[10px] font-semibold flex items-center gap-1 border border-slate-700 cursor-pointer"
+                >
+                  {hasCopiedRules ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  <span>{hasCopiedRules ? 'Tersalin' : 'Salin'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: INVENTORY DASHBOARD */}
           {activeTab === 'inventory' && (
             <>
@@ -1013,7 +1309,10 @@ export default function App() {
 
                             {/* Item name & QR code */}
                             <td className="py-3 px-4">
-                              <div className="font-bold text-slate-900 text-xs hover:text-indigo-600 cursor-pointer" onClick={() => setDetailItem(item)}>
+                              <div
+                                className="font-bold text-slate-900 text-xs hover:text-indigo-600 cursor-pointer"
+                                onClick={() => setDetailItem(item)}
+                              >
                                 {item.name}
                               </div>
                               <div className="flex items-center gap-1.5 mt-0.5">
@@ -1335,6 +1634,11 @@ export default function App() {
             setPrintingItem(item);
           }}
           onEditItem={(item) => {
+            if (!currentUser) {
+              alert('Silakan login terlebih dahulu untuk mengedit data inventaris.');
+              setCurrentView('login');
+              return;
+            }
             setDetailItem(null);
             setEditingItem(item);
             setIsFormOpen(true);
