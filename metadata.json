@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Inventarisasi & Barcode Barang",
+  "description": "Aplikasi manajemen inventaris barang sederhana dengan auto-generate barcode, pemindai kamera, cetak label thermal 50x30 mm, dan ekspor Excel.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
