@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { InventoryItem, ItemCondition } from '../types.ts';
 import { QRCodeView } from './QRCodeView.tsx';
+import { getItemScanUrl } from '../utils/qrUtils.ts';
 import {
   X,
   Printer,
@@ -178,12 +179,25 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col items-center justify-center gap-2">
               <div className="flex items-center gap-1.5 text-slate-500 text-xs font-semibold uppercase tracking-wider">
                 <QrCode className="w-4 h-4 text-indigo-600" />
-                <span>QR Code Unik Inventaris</span>
+                <span>QR Code Viewer Langsung (Kamera HP)</span>
               </div>
               <div className="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs">
-                <QRCodeView value={item.id} size={130} margin={1} />
+                <QRCodeView value={getItemScanUrl(item.id)} size={130} margin={1} />
               </div>
               <span className="text-xs font-mono font-bold text-slate-800">{item.id}</span>
+              <p className="text-[11px] text-slate-500 text-center max-w-xs">
+                Arahkan kamera HP ke QR code ini untuk langsung membuka rincian barang secara instan tanpa perlu login.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(getItemScanUrl(item.id));
+                  alert(`Tautan viewer untuk "${item.name}" berhasil disalin ke clipboard!`);
+                }}
+                className="mt-1 inline-flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer"
+              >
+                <span>Salin Tautan Viewer HP</span>
+              </button>
             </div>
           </div>
 

@@ -61,6 +61,7 @@ import { LoginPage } from './components/LoginPage.tsx';
 import { SetupCategories } from './components/SetupCategories.tsx';
 import { SetupConditions } from './components/SetupConditions.tsx';
 import { SetupUsers } from './components/SetupUsers.tsx';
+import { extractItemId, findInventoryItem } from './utils/qrUtils.ts';
 
 // Firestore service
 import {
@@ -479,15 +480,84 @@ export default function App() {
     }
   };
 
-  const handleScanSuccess = (scannedCode: string) => {
+  // Listen for direct URL query (?item=... or #item=...) when users scan using external smartphone camera
+  useEffect(() => {
+    let isCancelled = false;
+
+    const checkUrlForScannedItem = async () => {
+      if (typeof window === 'undefined') return;
+
+      const params = new URLSearchParams(window.location.search);
+      const rawParam =
+        params.get('item') ||
+        params.get('id') ||
+        params.get('code') ||
+        params.get('inv');
+
+      let targetCode = rawParam ? rawParam.trim() : '';
+
+      // Also check hash fragment (#item=... or #INV-...)
+      if (!targetCode && window.location.hash) {
+        const hash = window.location.hash.replace(/^#\/?/, '');
+        if (hash.includes('=')) {
+          const hashParams = new URLSearchParams(hash);
+          targetCode =
+            hashParams.get('item') ||
+            hashParams.get('id') ||
+            hashParams.get('code') ||
+            '';
+        } else if (/^INV-/i.test(hash)) {
+          targetCode = hash;
+        }
+      }
+
+      if (targetCode) {
+        const { item: found, extractedId } = await findInventoryItem(targetCode, items);
+        if (isCancelled) return;
+
+        if (found) {
+          setDetailItem(found);
+          showToast(`Barang ${found.id} berhasil dimuat dari pemindaian!`);
+        } else if (items.length > 0) {
+          showToast(`Kode "${extractedId || targetCode}" tidak ditemukan di database.`);
+        }
+      }
+    };
+
+    checkUrlForScannedItem();
+
+    const handleHashChange = () => {
+      checkUrlForScannedItem();
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    return () => {
+      isCancelled = true;
+      window.removeEventListener('hashchange', handleHashChange);
+    };
+  }, [items, showToast]);
+
+  // Robust Scanner Success Handler: parses URLs, extracts IDs, and queries both local state & Firestore
+  const handleScanSuccess = async (scannedCode: string) => {
     setIsScannerOpen(false);
-    const found = items.find((it) => it.id.toLowerCase() === scannedCode.toLowerCase());
-    if (found) {
-      setDetailItem(found);
-      showToast(`Barang ${found.id} berhasil ditemukan!`);
-    } else {
-      showToast(`Kode "${scannedCode}" tidak terdaftar di inventaris.`);
-      alert(`Kode QR "${scannedCode}" tidak ditemukan dalam sistem inventaris.`);
+    showToast('Memeriksa kode hasil scan...');
+
+    try {
+      const { item: found, extractedId } = await findInventoryItem(scannedCode, items);
+
+      if (found) {
+        setDetailItem(found);
+        showToast(`Barang ${found.id} berhasil ditemukan!`);
+      } else {
+        const displayCode = extractedId || extractItemId(scannedCode) || scannedCode;
+        showToast(`Kode "${displayCode}" tidak terdaftar di inventaris.`);
+        alert(
+          `Kode QR / Barcode: "${displayCode}" tidak ditemukan dalam sistem inventaris.\n\nPastikan barang tersebut sudah didaftarkan di aplikasi dan tersimpan di database.`
+        );
+      }
+    } catch (err) {
+      console.error('Error handling scan:', err);
+      alert(`Gagal membaca kode scan: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -610,6 +680,30 @@ export default function App() {
           onLoginSuccess={handleLoginSuccess}
           onBackToHome={() => setCurrentView('landing')}
         />
+        {detailItem && (
+          <ItemDetailModal
+            item={detailItem}
+            onClose={() => setDetailItem(null)}
+            onOpenPrintLabel={(item) => {
+              setDetailItem(null);
+              setPrintingItem(item);
+            }}
+            onEditItem={() => {
+              alert('Silakan login terlebih dahulu untuk mengedit data inventaris.');
+            }}
+            onScanAnother={() => {
+              setDetailItem(null);
+              setIsScannerOpen(true);
+            }}
+          />
+        )}
+        {isScannerOpen && (
+          <ScannerModal
+            items={items}
+            onScanSuccess={handleScanSuccess}
+            onClose={() => setIsScannerOpen(false)}
+          />
+        )}
       </>
     );
   }

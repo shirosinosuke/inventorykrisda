@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 import QRCode from 'qrcode';
 import { InventoryItem } from '../types.ts';
 import { QRCodeView } from './QRCodeView.tsx';
+import { getItemScanUrl } from '../utils/qrUtils.ts';
 import { Printer, X, Download, Tag, Calendar, MapPin, QrCode } from 'lucide-react';
 
 interface LabelPrintModalProps {
@@ -11,6 +12,7 @@ interface LabelPrintModalProps {
 
 export const LabelPrintModal: React.FC<LabelPrintModalProps> = ({ item, onClose }) => {
   const labelRef = useRef<HTMLDivElement | null>(null);
+  const scanUrl = getItemScanUrl(item.id);
 
   const handlePrint = () => {
     window.print();
@@ -55,9 +57,9 @@ export const LabelPrintModal: React.FC<LabelPrintModalProps> = ({ item, onClose 
     ctx.fillText(`Lokasi: ${item.location}`, 24, 138);
     ctx.fillText(`Tgl Pendataan: ${item.dateRecorded}`, 24, 164);
 
-    // QR Code generation directly to canvas
+    // QR Code generation directly to canvas using direct viewer URL
     try {
-      const qrDataUrl = await QRCode.toDataURL(item.id, {
+      const qrDataUrl = await QRCode.toDataURL(scanUrl, {
         width: 170,
         margin: 1,
         color: { dark: '#000000', light: '#ffffff' },
@@ -155,7 +157,7 @@ export const LabelPrintModal: React.FC<LabelPrintModalProps> = ({ item, onClose 
                   </p>
                 </div>
                 <div className="bg-white p-0.5 border border-black rounded shrink-0">
-                  <QRCodeView value={item.id} size={62} margin={0} />
+                  <QRCodeView value={scanUrl} size={62} margin={0} />
                 </div>
               </div>
 

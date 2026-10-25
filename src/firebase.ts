@@ -3,6 +3,7 @@ import {
   getFirestore,
   collection,
   doc,
+  getDoc,
   getDocs,
   setDoc,
   deleteDoc,
@@ -197,6 +198,22 @@ export async function deleteItemFromFirestore(id: string): Promise<{ success: bo
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `${ITEMS_COLLECTION}/${id}`);
     return { success: true, isCloud: false };
+  }
+}
+
+// Fetch single item from Firestore by ID
+export async function getItemFromFirestore(id: string): Promise<InventoryItem | null> {
+  if (!id) return null;
+  try {
+    const docRef = doc(db, ITEMS_COLLECTION, id);
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      return docSnap.data() as InventoryItem;
+    }
+    return null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `${ITEMS_COLLECTION}/${id}`);
+    return null;
   }
 }
 
